@@ -17,8 +17,8 @@ function todayStrings() {
   const mm = pad(now.getMonth() + 1);
   const dd = pad(now.getDate());
   return {
-    dash: `${yyyy}-${mm}-${dd}`, // 2026-07-24
-    compact: `${yyyy}${mm}${dd}`, // 20260724
+    dash: `${yyyy}-${mm}-${dd}`,
+    compact: `${yyyy}${mm}${dd}`,
   };
 }
 
@@ -29,7 +29,7 @@ export default async function handler(req, res) {
     const body = new URLSearchParams({
       ajax: "true",
       tmpInpStrDt: dash,
-      pbldDvCd: "1", // 1 = 당일 최초 고시 (당일 오전 고시 이후 계속 조회 가능)
+      pbldDvCd: "1",
       inqStrDt: compact,
       inqKindCd: "1",
       requestTarget: "searchContentDiv",
@@ -51,27 +51,54 @@ export default async function handler(req, res) {
     const html = await response.text();
     const $ = cheerio.load(html);
 
+    // 1) 헤더 행에서 "매매기준율" 칸의 실제 위치(인덱스)를 찾는다.
+    const headerCells = $("div.printdiv thead th, div.printdiv thead td");
+    let basicRateIdx = -1;
+    headerCells.each((i, el) => {
+      const text = $(el).text().replace(/\s+/g, "");
+      if (text.includes("매매기준율")) {
+        basicRateIdx = i;
+      }
+    });
+    if (basicRateIdx === -1) basicRateIdx = 9;
+
+    // 2) 통화별 상식적인 범위(1단위당 KRW). 벗어나면 잘못 읽은 것으로 보고 버린다.
+    const PLAUSIBLE_RANGE = {
+      USD: [900, 2500],
+      CNY: [100, 400],
+      JPY: [5, 20],
+      GBP: [1000, 3000],
+      AUD: [500, 1500],
+      PHP: [10, 50],
+      VND: [0.02, 0.1],
+      LAK: [0.02, 0.15],
+      MMK: [0.3, 1.5],
+      KHR: [0.2, 0.6],
+    };
+
     const rows = $("div.printdiv tbody > tr");
     const rates = {};
 
     rows.each((_, el) => {
       const tds = $(el).find("td");
-      if (tds.length < 10) return;
+      if (tds.length <= basicRateIdx) return;
 
       const nameCell = $(tds[0]).text().replace(/\s+/g, " ").trim();
       const codeMatch = nameCell.match(/([A-Z]{3})/);
       if (!codeMatch) return;
       const code = codeMatch[1];
 
-      // 100단위 고시 통화(예: JPY(100), VND(100) 등) 여부 확인
-      const isPer100 = /\(100\)/.test(nameCell);
+      const isPer100 = /100/.test(nameCell);
 
-      // 매매기준율은 tbody > tr 의 10번째 td (index 9)
-      const basicRateText = $(tds[9]).text().replace(/,/g, "").trim();
+      const basicRateText = $(tds[basicRateIdx]).text().replace(/,/g, "").trim();
       const basicRate = parseFloat(basicRateText);
       if (Number.isNaN(basicRate)) return;
 
       const perUnit = isPer100 ? basicRate / 100 : basicRate;
+
+      const range = PLAUSIBLE_RANGE[code];
+      if (range && (perUnit < range[0] || perUnit > range[1])) return;
+
       rates[code] = perUnit;
     });
 
@@ -83,7 +110,7 @@ export default async function handler(req, res) {
     res.status(200).json({
       source: "hana-bank",
       updatedAt: new Date().toISOString(),
-      rates, // { USD: 1380.5, JPY: 9.32, CNY: 193.1, ... } — 1단위 외화당 KRW
+      rates,
     });
   } catch (err) {
     res.status(500).json({
